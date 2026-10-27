@@ -1,6 +1,6 @@
 CXX     = g++
 MPICXX  = mpic++
-LIB     = -lmpi -lpthread -lgfortran /lib64/liblapack.so.3 /lib64/libblas.so.3
+LIB = -lmpi -lpthread /lib64/libopenblas.so.0
 FLAG    = -g -Wall -I$(INCLUDE)  -fpermissive
 DEF_OPENMP = -fopenmp -DCAPLET_OPENMP
 DEF_MPI = -DCAPLET_MPI
@@ -25,6 +25,10 @@ CAPLET_OPENMP_OBJ = \
 	$(OBJ_OPENMP)/caplet_int.o \
 	$(OBJ_OPENMP)/caplet_widgets.o \
 	$(OBJ_OPENMP)/main.o \
+
+ifeq ($(DEBUG_PRINT), 1)
+    CXXFLAGS += -DENABLE_DEBUG_PRINTS
+endif
 
 all: capletMPI capletOpenMP 
 

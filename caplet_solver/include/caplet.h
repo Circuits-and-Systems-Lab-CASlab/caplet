@@ -116,6 +116,7 @@ private: //* variables
 
 	int nTotalWirePanels;
 	int nTotalDielPanels;
+	std::vector<int>normalSigns;
 
 
 	int*	indexIncrements;

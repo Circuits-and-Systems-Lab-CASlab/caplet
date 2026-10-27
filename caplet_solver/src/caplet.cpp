@@ -201,7 +201,7 @@ void Caplet::loadFastcapFile(const std::string filename){
 		stringTokenizer >> charTemp;
 		if (charTemp != 'Q'){
             cerr << "ERROR: only 'Q' panel type is supported in this solver!" << endl;
-            exit(1);
+            exit(1); 
 		}
 
         stringTokenizer >> CondOrDiel;
@@ -242,6 +242,28 @@ void Caplet::loadFastcapFile(const std::string filename){
 		x1.push_back(xmin); x2.push_back(xmax);
 		y1.push_back(ymin); y2.push_back(ymax);
 		z1.push_back(zmin); z2.push_back(zmax);
+
+         // find the sign of the normal vector
+        // Compute normal vector from vertices: (v1 - v0) x (v3 - v0)
+        double ux = xCoord[1] - xCoord[0];
+        double uy = yCoord[1] - yCoord[0];
+        double uz = zCoord[1] - zCoord[0];
+        double vx = xCoord[3] - xCoord[0];
+        double vy = yCoord[3] - yCoord[0];
+        double vz = zCoord[3] - zCoord[0];
+        double nx = uy * vz - uz * vy;
+        double ny = uz * vx - ux * vz;
+        double nz = ux * vy - uy * vx;
+
+        int nSign = 1;
+        if (std::abs(nx) >= std::abs(ny) && std::abs(nx) >= std::abs(nz)) {
+            nSign = (nx >= 0.0) ? 1 : -1;
+        } else if (std::abs(ny) >= std::abs(nx) && std::abs(ny) >= std::abs(nz)) {
+            nSign = (ny >= 0.0) ? 1 : -1;
+        } else {
+            nSign = (nz >= 0.0) ? 1 : -1;
+        }
+        this->normalSigns.push_back(nSign);
 
         if(CondOrDiel == 'D'){
             // New dielectric group?
@@ -418,12 +440,15 @@ void Caplet::loadFastcapFile(const std::string filename){
     }
     #endif
 
+    #ifdef ENABLE_DEBUG_PRINTS
     printAllData();
     // exit(2);
+    #endif
 
 
 }
 
+#ifdef ENABLE_DEBUG_PRINTS
 void Caplet::printAllData() const {
     using namespace std;
 
@@ -496,6 +521,7 @@ void Caplet::printAllData() const {
 
     cout << "========================================\n" << endl;
 }
+#endif
 
 
 void Caplet::loadCapletFile(const std::string filename){
@@ -706,8 +732,14 @@ void Caplet::extractC(MODE mode){
     #endif
 
     //* Init MPI
-    MPI::Init();
-    int rank = MPI::COMM_WORLD.Get_rank();
+    // MPI::Init();
+    // int rank = MPI::COMM_WORLD.Get_rank();
+
+
+    MPI_Init(nullptr, nullptr);
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     //* Subdivide panels if aspect ratio is too large
     this->modifyPanelAspectRatio();
@@ -732,7 +764,8 @@ void Caplet::extractC(MODE mode){
 	}
     this->isSolved = true;
 
-    MPI::Finalize();
+    // MPI::Finalize();
+    MPI_Finalize();
     if( rank!= 0 ){
 		return;
 	}
@@ -773,9 +806,10 @@ void Caplet::extractCCollocationDouble(){
     int nTotalGroups = this->nWires + this->nDiels;
     int nTotalUnknowns = nCoefs + nTotalDielPanels;
 
+    int rank = MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	if ( this->isLoaded == true ){
         //* Allocate system memory for double precision
-        if (MPI::COMM_WORLD.Get_rank()==0){
+        if (rank==0){
             this->dP 	= new double[nTotalUnknowns*nTotalUnknowns];
             this->drhs 	= new double[nTotalUnknowns*this->nWires];
             this->dcoefs= new double[nTotalUnknowns*this->nWires];
@@ -793,14 +827,14 @@ void Caplet::extractCCollocationDouble(){
 		std::cerr << "ERROR: structure file is not yet loaded" << std::endl;
 	}
     #ifdef CAPLET_TIMER
-    this->timeStart = MPI::Wtime();
+    this->timeStart = MPI_Wtime();
     #endif
 
     this->generateCollocationPMatrixDouble();
     this->generateRHSDouble();
 
     #ifdef CAPLET_TIMER
-    this->timeAfterFilling = MPI::Wtime();
+    this->timeAfterFilling = MPI_Wtime();
     #endif
 
 
@@ -830,7 +864,7 @@ void Caplet::extractCCollocationDouble(){
             &beta, this->dCmat, &this->nWires);
 
     #ifdef CAPLET_TIMER
-    this->timeAfterSolving = MPI::Wtime();
+    this->timeAfterSolving = MPI_Wtime();
  	this->fillingTime 	+= this->timeAfterFilling - this->timeStart;
  	this->solvingTime 	+= this->timeAfterSolving - this->timeAfterFilling;
  	this->totalTime		+= this->timeAfterSolving - this->timeStart;
@@ -882,7 +916,9 @@ void Caplet::generateCollocationPMatrixDouble() {
 
         delete[] ind;  
         // cout << "HI" <<endl;
-        print_dP(this->nPanels);
+        #ifdef ENABLE_DEBUG_PRINTS
+            print_dP(this->nPanels);
+        #endif
 
         return;
     }
@@ -902,10 +938,14 @@ void Caplet::generateCollocationPMatrixDouble() {
                 panelToUnknown[i] = dieIdx++;
         }
 
+        #ifdef ENABLE_DEBUG_PRINTS
         std::cout << "Panel to unknown mapping:" << std::endl;
+        #endif
         for (int i = 0; i < nPanels; ++i) {
+            #ifdef ENABLE_DEBUG_PRINTS
             std::cout << "Panel " << i << " (" << (isDielectric[i] ? "D" : "C") 
                     << ") -> unknown " << panelToUnknown[i] << std::endl;
+            #endif
         }
             // Fill matrix
         for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
@@ -921,16 +961,22 @@ void Caplet::generateCollocationPMatrixDouble() {
                     if (col == -1) continue;
                     double P = calGalerkinPEntry(eqPanel, srcPanel);
                     dP[row + nTotal * col] += P;
-                    std::cout << std::setw(14) << std::scientific << P << " " << endl;
-                    if (std::isnan(P) || std::isinf(P)) {
-                        std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-                    }
+                    #ifdef ENABLE_DEBUG_PRINTS
+                        std::cout << std::setw(14) << std::scientific << P << " " << endl;
+                        if (std::isnan(P) || std::isinf(P)) {
+                            std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
+                        }
+                    #endif
+
 
                     // cout << eqPanel, srcPanel, P << "";
 
                 }
             } else {  // Dielectric equation
-                cout << "materialA: " << this->materialA[eqPanel] << "materialB: " << this->materialB[eqPanel];
+                #ifdef ENABLE_DEBUG_PRINTS
+                    cout << "materialA: " << this->materialA[eqPanel] << "materialB: " << this->materialB[eqPanel];
+                #endif
+
                 double deps = this->materialA[eqPanel] - this->materialB[eqPanel];
                 for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
                     if(eqPanel==srcPanel){
@@ -943,12 +989,14 @@ void Caplet::generateCollocationPMatrixDouble() {
                     }
                     int col = panelToUnknown[srcPanel];
                     if (col == -1) continue;
-                    cout << "HIII\n";
+                    // cout << "HIII\n";
                     dP[row + nTotal * col] += deps * Q;
-                    std::cout << std::setw(14) << std::scientific << Q << " " << endl;
-                    if (std::isnan(Q) || std::isinf(Q)) {
-                        std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-                    }
+                    #ifdef ENABLE_DEBUG_PRINTS
+                        std::cout << std::setw(14) << std::scientific << Q << " " << endl;
+                        if (std::isnan(Q) || std::isinf(Q)) {
+                            std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
+                        }
+                    #endif
 
 
                     // cout << eqPanel, srcPanel, Q << endl;
@@ -958,10 +1006,14 @@ void Caplet::generateCollocationPMatrixDouble() {
 
         }
 
-        print_dP(nTotal);
+        #ifdef ENABLE_DEBUG_PRINTS
+            print_dP(nTotal);
+        #endif
+
     }
 }
 
+#ifdef ENABLE_DEBUG_PRINTS
 void Caplet::print_dP(int nTotal) const {
     std::cout << "\n=== Extended matrix dP (" << nTotal << "x" << nTotal << ") ===" << std::endl;
     for (int i = 0; i < nTotal; ++i) { 
@@ -973,6 +1025,7 @@ void Caplet::print_dP(int nTotal) const {
     }
     std::cout << std::endl;
 }
+#endif
 
 ////RUUUNS
 // double Caplet::calCollocationQEntry(int panel_i, int panel_j) {
@@ -1039,8 +1092,10 @@ double Caplet::calCollocationQEntry(int panel_i, int panel_j) {
     double dy = panels[panel_i][Y][CENTER] - panels[panel_j][Y][CENTER];
     double dz = panels[panel_i][Z][CENTER] - panels[panel_j][Z][CENTER];
 
-    cout << "panel_i: " << panel_i << " direction: " << dirs[panel_i] << endl;
-    cout << "panel_j: " << panel_j << " direction: " << dirs[panel_j] << endl;
+    #ifdef ENABLE_DEBUG_PRINTS
+        cout << "panel_i: " << panel_i << " direction: " << dirs[panel_i] << endl;
+        cout << "panel_j: " << panel_j << " direction: " << dirs[panel_j] << endl;
+    #endif
 
     // Component along the outward normal of panel i
     double ndotr = 0.0;
@@ -1244,18 +1299,20 @@ void Caplet::generateRHSDouble() {
     dscal_(&nRHS, &zero, this->dcoefs, &inc);
 
 
-    
-    std::cout << "DEBUG: nTotal=" << nTotal << ", nWires=" << nWires << ", nRHS=" << nRHS << std::endl;
-    std::cout << "DEBUG: nCoefs=" << nCoefs << ", nTotalDielPanels=" << nTotalDielPanels << std::endl;
-    std::cout << "DEBUG: nPanels=" << nPanels << std::endl;
+    #ifdef ENABLE_DEBUG_PRINTS
+        std::cout << "DEBUG: nTotal=" << nTotal << ", nWires=" << nWires << ", nRHS=" << nRHS << std::endl;
+        std::cout << "DEBUG: nCoefs=" << nCoefs << ", nTotalDielPanels=" << nTotalDielPanels << std::endl;
+        std::cout << "DEBUG: nPanels=" << nPanels << std::endl;
 
-    // Print nWirePanels
-    int sumWire = 0;
-    for (int i=0; i<nWires; ++i) {
-        std::cout << "nWirePanels[" << i << "]=" << nWirePanels[i] << std::endl;
-        sumWire += nWirePanels[i];
-    }
-    std::cout << "Sum nWirePanels = " << sumWire << ", nCoefs = " << nCoefs << std::endl;
+        // Print nWirePanels
+        int sumWire = 0;
+        for (int i=0; i<nWires; ++i) {
+            std::cout << "nWirePanels[" << i << "]=" << nWirePanels[i] << std::endl;
+            sumWire += nWirePanels[i];
+        }
+        std::cout << "Sum nWirePanels = " << sumWire << ", nCoefs = " << nCoefs << std::endl;
+    #endif
+
 
     
 
@@ -1292,13 +1349,15 @@ void Caplet::generateRHSDouble() {
     // Copy to drhs (same layout)
     dcopy_(&nRHS, this->dcoefs, &inc, this->drhs, &inc);
 
+    #ifdef ENABLE_DEBUG_PRINTS
     std::cout << "RHS matrix drhs:" << std::endl;
-for (int i = 0; i < nTotal; ++i) {
-    for (int j = 0; j < nWires; ++j) {
-        std::cout << std::setw(12) << std::scientific << drhs[i + nTotal * j] << " ";
+    for (int i = 0; i < nTotal; ++i) {
+        for (int j = 0; j < nWires; ++j) {
+            std::cout << std::setw(12) << std::scientific << drhs[i + nTotal * j] << " ";
+        }
+        std::cout << std::endl;
     }
-    std::cout << std::endl;
-}
+    #endif
 }
 
 
@@ -1308,7 +1367,8 @@ for (int i = 0; i < nTotal; ++i) {
 //*
 void Caplet::extractCGalerkinDouble(){
 
-    int rank = MPI::COMM_WORLD.Get_rank();
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     if ( this->isLoaded == true ){
         if( rank==0 ){
@@ -1325,7 +1385,7 @@ void Caplet::extractCGalerkinDouble(){
         std::cerr << "ERROR: structure file is not yet loaded" << std::endl;
     }
     #ifdef CAPLET_TIMER
-    this->timeStart = MPI::Wtime();;
+    this->timeStart = MPI_Wtime();
     #endif
 
 
@@ -1335,8 +1395,9 @@ void Caplet::extractCGalerkinDouble(){
     this->generateGalerkinPMatrixDouble();
     #endif
 
-
-    if (MPI::COMM_WORLD.Get_rank()!=0){
+    int rank2;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank2!=0){
         return;
     }
     //* End of core with non-zero rank
@@ -1344,7 +1405,7 @@ void Caplet::extractCGalerkinDouble(){
     this->generateRHSDouble();
 
     #ifdef CAPLET_TIMER
-    this->timeAfterFilling = MPI::Wtime();;
+    this->timeAfterFilling = MPI_Wtime();
     #endif
 
 
@@ -1379,7 +1440,7 @@ void Caplet::extractCGalerkinDouble(){
             &beta, this->dCmat, &this->nWires);
 
     #ifdef CAPLET_TIMER
-    this->timeAfterSolving = MPI::Wtime();
+    this->timeAfterSolving = MPI_Wtime();
 
     this->fillingTime 	+= this->timeAfterFilling - this->timeStart;
     this->solvingTime 	+= this->timeAfterSolving - this->timeAfterFilling;
@@ -1394,7 +1455,9 @@ void Caplet::extractCGalerkinDouble(){
 //*
 void Caplet::extractCGalerkin(){
 
-    int rank = MPI::COMM_WORLD.Get_rank();
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
 
     if ( this->isLoaded == true ){
         if( rank==0 ){
@@ -1411,7 +1474,7 @@ void Caplet::extractCGalerkin(){
         std::cerr << "ERROR: structure file is not yet loaded" << std::endl;
     }
     #ifdef CAPLET_TIMER
-    this->timeStart = MPI::Wtime();;
+    this->timeStart = MPI_Wtime();
     #endif
 
 
@@ -1423,14 +1486,17 @@ void Caplet::extractCGalerkin(){
     this->generateGalerkinPMatrix();
     #endif
 
-    if (MPI::COMM_WORLD.Get_rank()!=0){
+    int rank2;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank2!=0){
         return;
     }
     this->generateRHS();
 
 
     #ifdef CAPLET_TIMER
-    this->timeAfterFilling = MPI::Wtime();;
+    this->timeAfterFilling = MPI_Wtime();
     #endif
 
 
@@ -1465,7 +1531,7 @@ void Caplet::extractCGalerkin(){
             &beta, this->Cmat, &this->nWires);
 
     #ifdef CAPLET_TIMER
-    this->timeAfterSolving = MPI::Wtime();
+    this->timeAfterSolving = MPI_Wtime();
 
     this->fillingTime 	+= this->timeAfterFilling - this->timeStart;
     this->solvingTime 	+= this->timeAfterSolving - this->timeAfterFilling;
@@ -1589,8 +1655,9 @@ inline void ltind2sub(int k, int& i, int& j){
 }
 void Caplet::generateGalerkinPMatrixMPI(){
 
-    int rank = MPI::COMM_WORLD.Get_rank();
-    int numproc = MPI::COMM_WORLD.Get_size();
+    int rank, numproc;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numproc);
 
     int totalK = nPanels*(nPanels+1)/2;
     int nK = totalK/numproc;
@@ -1684,10 +1751,10 @@ void Caplet::generateGalerkinPMatrixMPI(){
 
     //* Combine sub-matrices to rank0 node
     if( rank==0 ){
-        MPI::Status status;
+        MPI_Status status;
         for ( int i=1; i<numproc; i++ ){
             int copylen = (lastC[i]-startC[i]+1)*nCoefs;
-            MPI::COMM_WORLD.Recv(tempP, copylen, MPI::FLOAT, i, 0, status);
+            MPI_Recv(tempP, copylen, MPI_FLOAT, i, 0, MPI_COMM_WORLD, &status);
             float alpha = 1.0f;
             int inc = 1;
             ptrP = P+(startC[i]*nCoefs);
@@ -1695,7 +1762,7 @@ void Caplet::generateGalerkinPMatrixMPI(){
         }
     }else{
         int copylen = (lastC[rank]-startC[rank]+1)*nCoefs;
-        MPI::COMM_WORLD.Send(tempP, copylen, MPI::FLOAT, 0, 0);
+        MPI_Send(tempP, copylen, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 
 
@@ -1709,8 +1776,9 @@ void Caplet::generateGalerkinPMatrixMPI(){
 }
 void Caplet::generateGalerkinPMatrixDoubleMPI(){
 
-    int rank = MPI::COMM_WORLD.Get_rank();
-    int numproc = MPI::COMM_WORLD.Get_size();
+    int rank, numproc;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numproc);
 
     int totalK = nPanels*(nPanels+1)/2;
     int nK = totalK/numproc;
@@ -1804,10 +1872,10 @@ void Caplet::generateGalerkinPMatrixDoubleMPI(){
 
     //* Combine sub-matrices to rank0 node
     if( rank==0 ){
-        MPI::Status status;
+        MPI_Status status;
         for ( int i=1; i<numproc; i++ ){
             int copylen = (lastC[i]-startC[i]+1)*nCoefs;
-            MPI::COMM_WORLD.Recv(tempP, copylen, MPI::DOUBLE, i, 0, status);
+            MPI_Recv(tempP, copylen, MPI_FLOAT, i, 0, MPI_COMM_WORLD, &status);
             double alpha = 1.0f;
             int inc = 1;
             ptrP = dP+(startC[i]*nCoefs);
@@ -1815,7 +1883,7 @@ void Caplet::generateGalerkinPMatrixDoubleMPI(){
         }
     }else{
         int copylen = (lastC[rank]-startC[rank]+1)*nCoefs;
-        MPI::COMM_WORLD.Send(tempP, copylen, MPI::DOUBLE, 0, 0);
+        MPI_Send(tempP, copylen, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 
 
