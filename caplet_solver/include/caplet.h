@@ -79,7 +79,9 @@ public: //* functions
     void printCmat();
     void printPanel(int index);
 	void printAllData() const;
-	void print_dP(int nTotal) const;
+	// void print_dP(int nTotal) const;
+	void print_dP(int nTotal, const std::string& filename = "dP_matrix_output.txt") const;
+
 
     //* Versioned algorithms
 
@@ -171,6 +173,7 @@ private: //* functions
 	shape_t selectShape(int panel);
 
 	double calCollocationQEntry(int panel_i, int panel_j);
+	double calCollocationDielectricEntry(int panel_i, int panel_j);
 
 private: //* coordinate functions
 	inline void rotateX2Z(float* coord_ptr[3][4], int panelNo){

@@ -26,8 +26,18 @@ CAPLET_OPENMP_OBJ = \
 	$(OBJ_OPENMP)/caplet_widgets.o \
 	$(OBJ_OPENMP)/main.o \
 
-ifeq ($(DEBUG_PRINT), 1)
-    CXXFLAGS += -DENABLE_DEBUG_PRINTS
+# Default values (optional, overridden when passed via CLI)
+ENABLE_DEBUG_PRINTS ?= 0
+ENABLE_P_MATRIX_PRINT ?= 0
+
+# Condition 1: Check general debug prints
+ifeq ($(strip $(ENABLE_DEBUG_PRINTS)), 1)
+	FLAG += -DENABLE_DEBUG_PRINTS
+endif
+
+# Condition 2: Check P-matrix prints
+ifeq ($(strip $(ENABLE_P_MATRIX_PRINT)), 1)
+	FLAG += -DENABLE_P_MATRIX_PRINT
 endif
 
 all: capletMPI capletOpenMP 

@@ -717,6 +717,43 @@ void Caplet::saveCoefs(const std::string filename){
 	}
 }
 
+//function to implement the dielectric interactions for the P matrix
+//Pij(diel)=(Aj(ri-rj) . ni)/4*pi*epsilon0*dij^3
+double Caplet::calCollocationDielectricEntry(int panel_i, int panel_j) {
+    const double four_pi_eps0 = 4.0*M_PI*(double)epsilon0;
+
+    // Self term (i == j): -lambda_i = -(eps_in + eps_out) / (2 * eps0 * (eps_in - eps_out))
+    if (panel_i==panel_j) {
+        double eps_in  = this->materialA[panel_i];
+        double eps_out = this->materialB[panel_i];
+        return -((eps_in + eps_out) / (2.0 * (double)epsilon0 * (eps_in - eps_out)));
+    }
+
+    // Off-diagonal (i != j): 1-point far-field approximation
+    // Pij^diel = A_j * ((r_i - c_j) . n_hat_i) / (4 * pi * eps0 * d_ij^3)
+    double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
+    double dy = panels[panel_i][Y][CENTER] - panels[panel_j][Y][CENTER];
+    double dz = panels[panel_i][Z][CENTER] - panels[panel_j][Z][CENTER];
+    double dij = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (dij < 1e-18) 
+        return 0.0;
+
+    int ni_axis = dirs[panel_i];
+    double ni_sign = (double)normalSigns[panel_i];
+
+    double r_dot_n = 0.0;
+    if (ni_axis == X)      
+        r_dot_n=dx*ni_sign;
+    else if (ni_axis == Y)
+        r_dot_n=dy*ni_sign;
+    else                   
+        r_dot_n=dz*ni_sign;
+
+    double Aj = (double)areas[panel_j];
+    return (Aj*r_dot_n) / (four_pi_eps0*dij*dij*dij);
+}
+
 void Caplet::extractC(MODE mode){
 	this->mode = mode;
 
@@ -916,7 +953,7 @@ void Caplet::generateCollocationPMatrixDouble() {
 
         delete[] ind;  
         // cout << "HI" <<endl;
-        #ifdef ENABLE_DEBUG_PRINTS
+        #ifdef ENABLE_P_MATRIX_PRINT
             print_dP(this->nPanels);
         #endif
 
@@ -930,12 +967,12 @@ void Caplet::generateCollocationPMatrixDouble() {
         // so the panels are in the correct order for the matrix however they were read
         //create a vector with unitialised elements
         std::vector<int> panelToUnknown(this->nPanels, -1);
-        int condIdx = 0, dieIdx = this->nTotalWirePanels;
+        int condIdx = 0, dielIdx = this->nTotalWirePanels;
         for (int i = 0; i < this->nPanels; ++i) {
             if (!isDielectric[i])
                 panelToUnknown[i] = condIdx++;
             else
-                panelToUnknown[i] = dieIdx++;
+                panelToUnknown[i] = dielIdx++;
         }
 
         #ifdef ENABLE_DEBUG_PRINTS
@@ -948,82 +985,126 @@ void Caplet::generateCollocationPMatrixDouble() {
             #endif
         }
             // Fill matrix
+        // for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
+        //      //find to which uknown the current panel corresponds to 
+        //      //for example eqPanel=0 could correspond to dielectric which is after the conductors in the P matrix
+        //     int row = panelToUnknown[eqPanel];
+        //     if (row == -1)
+        //         continue;
+
+        //     if (!isDielectric[eqPanel]) {  // Conductor equation
+        //         for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
+        //             int col = panelToUnknown[srcPanel];
+        //             if (col == -1) continue;
+        //             double P = calGalerkinPEntry(eqPanel, srcPanel);
+        //             dP[row + nTotal * col] += P;
+        //             #ifdef ENABLE_DEBUG_PRINTS
+        //                 std::cout << std::setw(14) << std::scientific << P << " " << endl;
+        //                 if (std::isnan(P) || std::isinf(P)) {
+        //                     std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
+        //                 }
+        //             #endif
+        //         }
+        //     } else {  // Dielectric equation
+        //         #ifdef ENABLE_DEBUG_PRINTS
+        //             cout << "materialA: " << this->materialA[eqPanel] << "materialB: " << this->materialB[eqPanel];
+        //         #endif
+
+        //         double deps = this->materialA[eqPanel] - this->materialB[eqPanel];
+        //         for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
+        //             if(eqPanel==srcPanel){
+        //                 // Q=(deps)/(2*epsilon0);
+        //                 Q=0;
+        //             }
+        //             else{
+        //             Q = calCollocationQEntry(eqPanel, srcPanel);
+
+        //             }
+        //             int col = panelToUnknown[srcPanel];
+        //             if (col == -1) continue;
+        //             // cout << "HIII\n";
+        //             dP[row + nTotal * col] += deps * Q;
+        //             #ifdef ENABLE_DEBUG_PRINTS
+        //                 std::cout << std::setw(14) << std::scientific << Q << " " << endl;
+        //                 if (std::isnan(Q) || std::isinf(Q)) {
+        //                     std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
+        //                 }
+        //             #endif
+
+
+        //             // cout << eqPanel, srcPanel, Q << endl;
+
+        //         }
+        //     }
+
+        // }
+
+        const double four_pi_eps0 = 4.0 * M_PI * (double)epsilon0;      
+
         for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
-             //find to which uknown the current panel corresponds to 
-             //for example eqPanel=0 could correspond to dielectric which is after the conductors in the P matrix
-            int row = panelToUnknown[eqPanel];
-            if (row == -1)
-                continue;
+                int row = panelToUnknown[eqPanel];
+                if (row == -1) continue;
 
-            if (!isDielectric[eqPanel]) {  // Conductor equation
                 for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
                     int col = panelToUnknown[srcPanel];
                     if (col == -1) continue;
-                    double P = calGalerkinPEntry(eqPanel, srcPanel);
-                    dP[row + nTotal * col] += P;
-                    #ifdef ENABLE_DEBUG_PRINTS
-                        std::cout << std::setw(14) << std::scientific << P << " " << endl;
-                        if (std::isnan(P) || std::isinf(P)) {
-                            std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-                        }
-                    #endif
 
-
-                    // cout << eqPanel, srcPanel, P << "";
-
-                }
-            } else {  // Dielectric equation
-                #ifdef ENABLE_DEBUG_PRINTS
-                    cout << "materialA: " << this->materialA[eqPanel] << "materialB: " << this->materialB[eqPanel];
-                #endif
-
-                double deps = this->materialA[eqPanel] - this->materialB[eqPanel];
-                for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
-                    if(eqPanel==srcPanel){
-                        // Q=(deps)/(2*epsilon0);
-                        Q=0;
+                    if (!isDielectric[eqPanel]) {
+                        // Conductor row: Use the original calGalerkinPEntry as requested
+                        double P_val = calGalerkinPEntry(eqPanel, srcPanel);
+                        
+                        // We divide by 4*pi*eps0 here so the conductor block's physical scale 
+                        // perfectly matches the dielectric block's physical scale.
+                        dP[ψολ + nTotal * col] += P_val / four_pi_eps0; 
+                    } else {
+                        // Dielectric row: Use the dielectric boundary condition function
+                        dP[row + nTotal * col] += calCollocationDielectricEntry(eqPanel, srcPanel);
                     }
-                    else{
-                    Q = calCollocationQEntry(eqPanel, srcPanel);
-
-                    }
-                    int col = panelToUnknown[srcPanel];
-                    if (col == -1) continue;
-                    // cout << "HIII\n";
-                    dP[row + nTotal * col] += deps * Q;
-                    #ifdef ENABLE_DEBUG_PRINTS
-                        std::cout << std::setw(14) << std::scientific << Q << " " << endl;
-                        if (std::isnan(Q) || std::isinf(Q)) {
-                            std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-                        }
-                    #endif
-
-
-                    // cout << eqPanel, srcPanel, Q << endl;
-
                 }
             }
 
-        }
-
-        #ifdef ENABLE_DEBUG_PRINTS
-            print_dP(nTotal);
+        #ifdef ENABLE_P_MATRIX_PRINT
+            print_dP(nTotal, "dP_matrix_output.txt");
         #endif
 
     }
 }
 
-#ifdef ENABLE_DEBUG_PRINTS
-void Caplet::print_dP(int nTotal) const {
-    std::cout << "\n=== Extended matrix dP (" << nTotal << "x" << nTotal << ") ===" << std::endl;
+#ifdef ENABLE_P_MATRIX_PRINT
+//PRINT IN TERMINAL
+// void Caplet::print_dP(int nTotal) const {
+//     std::cout << "\n=== Extended matrix dP (" << nTotal << "x" << nTotal << ") ===" << std::endl;
+//     for (int i = 0; i < nTotal; ++i) { 
+//         for (int j = 0; j < nTotal; ++j) {
+//             // dP is column‑major: element (i,j) is stored at index  (1/(4*3.1415926535f*epsilon0)) i + nTotal*j
+//             std::cout << std::setw(14) << std::scientific << dP[i + nTotal * j] << " ";
+//         }
+//         std::cout << std::endl;
+//     }
+//     std::cout << std::endl;
+// }
+
+//PRINT IN FILE
+void Caplet::print_dP(int nTotal, const std::string& filename) const {
+    // Open the file for writing (use std::ios::app if you want to append instead of overwrite)
+    std::ofstream outFile(filename);
+    
+    if (!outFile.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
+        return;
+    }
+
+    outFile << "\n=== Extended matrix dP (" << nTotal << "x" << nTotal << ") ===" << std::endl;
     for (int i = 0; i < nTotal; ++i) { 
         for (int j = 0; j < nTotal; ++j) {
-            // dP is column‑major: element (i,j) is stored at index  (1/(4*3.1415926535f*epsilon0)) i + nTotal*j
-            std::cout << std::setw(14) << std::scientific << dP[i + nTotal * j] << " ";
+            // dP is column-major: element (i,j) is stored at index i + nTotal*j
+            outFile << std::setw(14) << std::scientific << dP[i + nTotal * j] << " ";
         }
-        std::cout << std::endl;
+        outFile << std::endl;
     }
-    std::cout << std::endl;
+    outFile << std::endl;
+    
+    outFile.close();
 }
 #endif
 
