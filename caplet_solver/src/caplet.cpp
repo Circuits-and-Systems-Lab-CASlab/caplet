@@ -245,25 +245,25 @@ void Caplet::loadFastcapFile(const std::string filename){
 
          // find the sign of the normal vector
         // Compute normal vector from vertices: (v1 - v0) x (v3 - v0)
-        double ux = xCoord[1] - xCoord[0];
-        double uy = yCoord[1] - yCoord[0];
-        double uz = zCoord[1] - zCoord[0];
-        double vx = xCoord[3] - xCoord[0];
-        double vy = yCoord[3] - yCoord[0];
-        double vz = zCoord[3] - zCoord[0];
-        double nx = uy * vz - uz * vy;
-        double ny = uz * vx - ux * vz;
-        double nz = ux * vy - uy * vx;
+        // double ux = xCoord[1] - xCoord[0];
+        // double uy = yCoord[1] - yCoord[0];
+        // double uz = zCoord[1] - zCoord[0];
+        // double vx = xCoord[3] - xCoord[0];
+        // double vy = yCoord[3] - yCoord[0];
+        // double vz = zCoord[3] - zCoord[0];
+        // double nx = uy * vz - uz * vy;
+        // double ny = uz * vx - ux * vz;
+        // double nz = ux * vy - uy * vx;
 
-        int nSign = 1;
-        if (std::abs(nx) >= std::abs(ny) && std::abs(nx) >= std::abs(nz)) {
-            nSign = (nx >= 0.0) ? 1 : -1;
-        } else if (std::abs(ny) >= std::abs(nx) && std::abs(ny) >= std::abs(nz)) {
-            nSign = (ny >= 0.0) ? 1 : -1;
-        } else {
-            nSign = (nz >= 0.0) ? 1 : -1;
-        }
-        this->normalSigns.push_back(nSign);
+        // int nSign = 1;
+        // if (std::abs(nx) >= std::abs(ny) && std::abs(nx) >= std::abs(nz)) {
+        //     nSign = (nx >= 0.0) ? 1 : -1;
+        // } else if (std::abs(ny) >= std::abs(nx) && std::abs(ny) >= std::abs(nz)) {
+        //     nSign = (ny >= 0.0) ? 1 : -1;
+        // } else {
+        //     nSign = (nz >= 0.0) ? 1 : -1;
+        // }
+        // this->normalSigns.push_back(nSign);
 
         if(CondOrDiel == 'D'){
             // New dielectric group?
@@ -440,6 +440,32 @@ void Caplet::loadFastcapFile(const std::string filename){
     }
     #endif
 
+        // 2. FORCE OUTWARD NORMALS (Immune to missing faces)
+    this->normalSigns.assign(this->nPanels, 1); 
+    
+    for (int i = 0; i < this->nPanels; ++i) {
+        if (isDielectric[i]) {
+            double eps = materialA[i];
+            int axis = dirs[i];
+            double min_c = 1e9, max_c = -1e9;
+            
+            // Find the true geometric bounds of the dielectric block
+            for (int j = 0; j < this->nPanels; ++j) {
+                if (isDielectric[j] && materialA[j] == eps) {
+                    if (panels[j][axis][MIN] < min_c) min_c = panels[j][axis][MIN];
+                    if (panels[j][axis][MAX] > max_c) max_c = panels[j][axis][MAX];
+                }
+            }
+            
+            // The true center of the volume is exactly halfway between the bounds
+            double geo_center = (min_c + max_c) / 2.0;
+            
+            // If the panel is above the center, outward normal is +1. Below is -1.
+            double center = panels[i][axis][CENTER];
+            this->normalSigns[i] = (center >= geo_center) ? 1 : -1;
+        }
+    }
+
     #ifdef ENABLE_DEBUG_PRINTS
     printAllData();
     // exit(2);
@@ -458,10 +484,9 @@ void Caplet::printAllData() const {
     cout << "nWires (conductors): " << nWires << endl;
     cout << "nDiels (dielectric groups): " << nDiels << endl;
     cout << "nPanels (total): " << nPanels << endl;
-    cout << "nWirePanels (dielectric panels): " << nTotalWirePanels << endl;
+    cout << "nWirePanels (conductor panels): " << nTotalWirePanels << endl;
     cout << "nDielPanels (dielectric panels): " << nTotalDielPanels << endl;
     cout << "nCoefs (basis functions, = conductor panels): " << nCoefs << endl;
-
 
     // Per-conductor panel counts
     cout << "\n--- Conductor groups ---" << endl;
@@ -470,7 +495,7 @@ void Caplet::printAllData() const {
              << ", nWireCoefs=" << nWireCoefs[i] << endl;
     }
 
-    // Per-dielectric group counts (if any)
+    // Per-dielectric group counts
     if (nDiels > 0) {
         cout << "\n--- Dielectric groups ---" << endl;
         for (int i = 0; i < nDiels; ++i) {
@@ -480,41 +505,49 @@ void Caplet::printAllData() const {
     }
 
     // Panel details
-    cout << "\n--- Panel data (index, type, geometry, normal, area, eps1, eps2) ---" << endl;
+    cout << "\n--- Panel data ---" << endl;
     for (int i = 0; i < nPanels; ++i) {
-        // Panel type
         const char* typeStr = (i < (int)isDielectric.size() && isDielectric[i]) ? "DIELECTRIC" : "CONDUCTOR";
-
         cout << "Panel " << i << " : " << typeStr << endl;
-        cout << "  X: min=" << panels[i][X][MIN] << " max=" << panels[i][X][MAX]
-             << " len=" << panels[i][X][LENGTH] << " center=" << panels[i][X][CENTER] << endl;
-        cout << "  Y: min=" << panels[i][Y][MIN] << " max=" << panels[i][Y][MAX]
-             << " len=" << panels[i][Y][LENGTH] << " center=" << panels[i][Y][CENTER] << endl;
-        cout << "  Z: min=" << panels[i][Z][MIN] << " max=" << panels[i][Z][MAX]
-             << " len=" << panels[i][Z][LENGTH] << " center=" << panels[i][Z][CENTER] << endl;
 
-        // Normal direction
+        // Print reconstructed 4 corner points from the bounding box
+        int d = dirs[i];
+        int d1 = (d + 1) % 3;
+        int d2 = (d + 2) % 3;
+        
+        float pt[4][3];
+        for (int p = 0; p < 4; ++p) {
+            pt[p][d] = panels[i][d][CENTER]; // Flat axis remains constant
+        }
+        pt[0][d1] = panels[i][d1][MIN]; pt[0][d2] = panels[i][d2][MIN];
+        pt[1][d1] = panels[i][d1][MAX]; pt[1][d2] = panels[i][d2][MIN];
+        pt[2][d1] = panels[i][d1][MAX]; pt[2][d2] = panels[i][d2][MAX];
+        pt[3][d1] = panels[i][d1][MIN]; pt[3][d2] = panels[i][d2][MAX];
+
+        cout << "  Vertices: " << endl;
+        for (int p = 0; p < 4; ++p) {
+            cout << "    P" << p << ": (" << pt[p][X] << ", " << pt[p][Y] << ", " << pt[p][Z] << ")" << endl;
+        }
+
         const char* dirName = "?";
         if (dirs[i] == X) dirName = "X";
         else if (dirs[i] == Y) dirName = "Y";
         else if (dirs[i] == Z) dirName = "Z";
-        cout << "  normal dir = " << dirName << " (value " << dirs[i] << ")" << endl;
-        cout << "  area = " << areas[i] << endl;
 
-        // Permittivities (materialA/B)
-        if (i < (int)materialA.size() && i < (int)materialB.size()) {
-            cout << "  eps1 (side of normal) = " << materialA[i] << endl;
-            cout << "  eps2 (opposite side)  = " << materialB[i] << endl;
+        cout << "  Normal Axis: " << dirName << " (value " << dirs[i] << ")" << endl;
+        
+        if (i < (int)normalSigns.size()) {
+            cout << "  Normal Sign: " << normalSigns[i] << endl;
         } else {
-            cout << "  WARNING: materialA/B not available for this panel" << endl;
+            cout << "  Normal Sign: [NOT SET]" << endl;
         }
 
-        // Basis function info (always flat for FastCap files)
-        cout << "  basisType = " << basisTypes[i] << " (F=flat)" << endl;
-        cout << "  indexIncrement = " << indexIncrements[i] << endl;
-        cout << "  basisDir = " << basisDirs[i] << " (FLAT=" << FLAT << ")" << endl;
-        cout << "  basisZ = " << basisZs[i] << endl;
-        cout << "  basisShift = " << basisShifts[i] << endl;
+        cout << "  Area: " << areas[i] << endl;
+
+        if (i < (int)materialA.size() && i < (int)materialB.size()) {
+            cout << "  eps_in  (materialA): " << materialA[i] << endl;
+            cout << "  eps_out (materialB): " << materialB[i] << endl;
+        }
 
         cout << "  ---" << endl;
     }
@@ -722,36 +755,37 @@ void Caplet::saveCoefs(const std::string filename){
 double Caplet::calCollocationDielectricEntry(int panel_i, int panel_j) {
     const double four_pi_eps0 = 4.0*M_PI*(double)epsilon0;
 
+    double eps_in  = this->materialA[panel_i];
+    double eps_out = this->materialB[panel_i];
+
     // Self term (i == j): -lambda_i = -(eps_in + eps_out) / (2 * eps0 * (eps_in - eps_out))
     if (panel_i==panel_j) {
-        double eps_in  = this->materialA[panel_i];
-        double eps_out = this->materialB[panel_i];
+
         return -((eps_in + eps_out) / (2.0 * (double)epsilon0 * (eps_in - eps_out)));
     }
 
     // Off-diagonal (i != j): 1-point far-field approximation
     // Pij^diel = A_j * ((r_i - c_j) . n_hat_i) / (4 * pi * eps0 * d_ij^3)
-    double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
+double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
     double dy = panels[panel_i][Y][CENTER] - panels[panel_j][Y][CENTER];
     double dz = panels[panel_i][Z][CENTER] - panels[panel_j][Z][CENTER];
     double dij = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    if (dij < 1e-18) 
-        return 0.0;
+    if (dij < 1e-18) return 0.0;
 
     int ni_axis = dirs[panel_i];
     double ni_sign = (double)normalSigns[panel_i];
 
+    // Note the minus sign (-dx, -dy, -dz) to match MATLAB's gradient convention (c_j - r_i)
     double r_dot_n = 0.0;
-    if (ni_axis == X)      
-        r_dot_n=dx*ni_sign;
-    else if (ni_axis == Y)
-        r_dot_n=dy*ni_sign;
-    else                   
-        r_dot_n=dz*ni_sign;
+    if (ni_axis == X)      r_dot_n = dx * ni_sign;
+    else if (ni_axis == Y) r_dot_n = dy * ni_sign;
+    else                   r_dot_n = dz * ni_sign;
+
+    
 
     double Aj = (double)areas[panel_j];
-    return (Aj*r_dot_n) / (four_pi_eps0*dij*dij*dij);
+    return (Aj * r_dot_n) / (four_pi_eps0 * dij * dij * dij);
 }
 
 void Caplet::extractC(MODE mode){
@@ -918,6 +952,16 @@ void Caplet::generateCollocationPMatrixDouble() {
     dscal_(&nC, &zero, dP, &inc);
     double Q;
 
+
+    int nTotal = this->nCoefs + this->nTotalDielPanels;
+
+    // 1. Secure Matrix Wipe
+    int nMatSize = nTotal * nTotal;
+    std::fill(dP, dP + nMatSize, 0.0);
+
+
+    
+
     //if there are no dielectric panels just use the the original code for conductors
     if(this->nTotalDielPanels==0){
         // Build index vector: ind[i] maps panel index i to its row/col in dP.
@@ -984,7 +1028,8 @@ void Caplet::generateCollocationPMatrixDouble() {
                     << ") -> unknown " << panelToUnknown[i] << std::endl;
             #endif
         }
-            // Fill matrix
+
+        // Fill matrix
         // for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
         //      //find to which uknown the current panel corresponds to 
         //      //for example eqPanel=0 could correspond to dielectric which is after the conductors in the P matrix
@@ -1043,21 +1088,23 @@ void Caplet::generateCollocationPMatrixDouble() {
 
         for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
                 int row = panelToUnknown[eqPanel];
-                if (row == -1) continue;
+                if (row == -1) 
+                    continue;
 
                 for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
                     int col = panelToUnknown[srcPanel];
-                    if (col == -1) continue;
+                    if (col == -1) 
+                        continue;
 
                     if (!isDielectric[eqPanel]) {
-                        // Conductor row: Use the original calGalerkinPEntry as requested
-                        double P_val = calGalerkinPEntry(eqPanel, srcPanel);
-                        
-                        // We divide by 4*pi*eps0 here so the conductor block's physical scale 
-                        // perfectly matches the dielectric block's physical scale.
-                        dP[ψολ + nTotal * col] += P_val / four_pi_eps0; 
+            // Use Galerkin, but divide by the test panel area (areas[eqPanel]) 
+                // to convert the double integral back into a collocation-style single integral
+                double P_val = calGalerkinPEntry(eqPanel, srcPanel);
+                double Ai = (double)areas[eqPanel];
+                
+                dP[row + nTotal * col] += (P_val / Ai) / four_pi_eps0;
                     } else {
-                        // Dielectric row: Use the dielectric boundary condition function
+                        // Dielectric row: use the dielectric boundary condition function
                         dP[row + nTotal * col] += calCollocationDielectricEntry(eqPanel, srcPanel);
                     }
                 }
