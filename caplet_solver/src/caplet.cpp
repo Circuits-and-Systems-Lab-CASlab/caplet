@@ -42,6 +42,7 @@ along with CAPLET.  If not, see <http://www.gnu.org/licenses/>.
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
+#include <algorithm>
 
 
 namespace caplet{
@@ -440,7 +441,9 @@ void Caplet::loadFastcapFile(const std::string filename){
     }
     #endif
 
-        // 2. FORCE OUTWARD NORMALS (Immune to missing faces)
+    //Ensure the normal vector of every dielectric panelnormal points
+    // from the epsilon_in side to the epsilon_out side
+
     this->normalSigns.assign(this->nPanels, 1); 
     
     for (int i = 0; i < this->nPanels; ++i) {
@@ -465,6 +468,10 @@ void Caplet::loadFastcapFile(const std::string filename){
             this->normalSigns[i] = (center >= geo_center) ? 1 : -1;
         }
     }
+
+    //populate the eps_out of the conductors
+    populateConductorMediums();
+
 
     #ifdef ENABLE_DEBUG_PRINTS
     printAllData();
@@ -750,6 +757,16 @@ void Caplet::saveCoefs(const std::string filename){
 	}
 }
 
+
+// Place the 7x7 Gauss constants right above the function
+static const int GAUSS_N = 7;
+static const double gauss_p[7] = {-0.949107912342758, -0.741531185599394, -0.405845151377397, 
+                                   0.0,                
+                                   0.405845151377397,  0.741531185599394,  0.949107912342758};
+static const double gauss_w[7] = {0.129484966168870, 0.279705391489277, 0.381830050505119, 
+                                  0.417959183673469, 
+                                  0.381830050505119, 0.279705391489277, 0.129484966168870};
+
 //function to implement the dielectric interactions for the P matrix
 //Pij(diel)=(Aj(ri-rj) . ni)/4*pi*epsilon0*dij^3
 double Caplet::calCollocationDielectricEntry(int panel_i, int panel_j) {
@@ -764,29 +781,159 @@ double Caplet::calCollocationDielectricEntry(int panel_i, int panel_j) {
         return -((eps_in + eps_out) / (2.0 * (double)epsilon0 * (eps_in - eps_out)));
     }
 
+    double target_x = panels[panel_i][X][CENTER];
+    double target_y = panels[panel_i][Y][CENTER];
+    double target_z = panels[panel_i][Z][CENTER];
+    
+    double source_x = panels[panel_j][X][CENTER];
+    double source_y = panels[panel_j][Y][CENTER];
+    double source_z = panels[panel_j][Z][CENTER];
+
     // Off-diagonal (i != j): 1-point far-field approximation
     // Pij^diel = A_j * ((r_i - c_j) . n_hat_i) / (4 * pi * eps0 * d_ij^3)
-double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
+    double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
     double dy = panels[panel_i][Y][CENTER] - panels[panel_j][Y][CENTER];
     double dz = panels[panel_i][Z][CENTER] - panels[panel_j][Z][CENTER];
     double dij = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    if (dij < 1e-18) return 0.0;
+    if (dij < 1e-18){
+        return 0.0;
+    }
 
     int ni_axis = dirs[panel_i];
     double ni_sign = (double)normalSigns[panel_i];
-
-    // Note the minus sign (-dx, -dy, -dz) to match MATLAB's gradient convention (c_j - r_i)
-    double r_dot_n = 0.0;
-    if (ni_axis == X)      r_dot_n = dx * ni_sign;
-    else if (ni_axis == Y) r_dot_n = dy * ni_sign;
-    else                   r_dot_n = dz * ni_sign;
-
-    
-
     double Aj = (double)areas[panel_j];
-    return (Aj * r_dot_n) / (four_pi_eps0 * dij * dij * dij);
+
+    // Near / Far Condition based on PDF (kappa = 6)
+    if (dij < 6.0 * std::sqrt(Aj)) {
+        // NEAR-FIELD: 7x7 Gauss-Legendre Quadrature
+        
+        // Find the 2D surface axes (u, v) of the source panel j
+        int nj_axis = dirs[panel_j];
+        int u_axis = (nj_axis == X) ? Y : X;
+        int v_axis = (nj_axis == Z) ? Y : Z; 
+
+        double u_half = (panels[panel_j][u_axis][MAX] - panels[panel_j][u_axis][MIN]) / 2.0;
+        double v_half = (panels[panel_j][v_axis][MAX] - panels[panel_j][v_axis][MIN]) / 2.0;
+        double u_center = panels[panel_j][u_axis][CENTER];
+        double v_center = panels[panel_j][v_axis][CENTER];
+        double norm_pos = panels[panel_j][nj_axis][CENTER];
+
+        double integral_sum = 0.0;
+        for (int gu = 0; gu < GAUSS_N; ++gu) {
+            for (int gv = 0; gv < GAUSS_N; ++gv) {
+                // Map [-1, 1] Gauss points to the physical 3D panel coordinates
+                double pt[3];
+                pt[u_axis] = u_center + u_half * gauss_p[gu];
+                pt[v_axis] = v_center + v_half * gauss_p[gv];
+                pt[nj_axis] = norm_pos;
+
+                // Distance from Gauss point on source 'j' to center of target 'i'
+                double dx_q = target_x - pt[X];
+                double dy_q = target_y - pt[Y];
+                double dz_q = target_z - pt[Z];
+                double R_jq = std::sqrt(dx_q*dx_q + dy_q*dy_q + dz_q*dz_q);
+                double R_jq3 = R_jq * R_jq * R_jq;
+
+                // Evaluate the dot product at this specific point: (r_i - r_jq) . n_hat_i
+                double r_dot_n_q = 0.0;
+                if (ni_axis == X)      r_dot_n_q = dx_q * ni_sign;
+                else if (ni_axis == Y) r_dot_n_q = dy_q * ni_sign;
+                else                   r_dot_n_q = dz_q * ni_sign;
+
+                // w_jq = |ds x dt| * W_q = (u_half * v_half) * W_u * W_v
+                double weight = gauss_w[gu] * gauss_w[gv] * u_half * v_half;
+                
+                integral_sum += (weight * r_dot_n_q) / R_jq3;
+            }
+        }
+        return integral_sum / four_pi_eps0;
+
+    } 
+    else {
+        double r_dot_n = 0.0;
+        if (ni_axis == X){  
+            r_dot_n = dx * ni_sign;
+        }
+        else if (ni_axis == Y){
+            r_dot_n = dy * ni_sign;
+        }
+        else{                   
+            r_dot_n = dz * ni_sign;
+        }
+
+
+        
+
+        return (Aj * r_dot_n) / (four_pi_eps0 * dij * dij * dij);
+    }
 }
+
+//CONDUCTOR EQUATION THAT IS NOT BEING USED LEFT HERE FOR POTENTIAL FUTURE USE
+// double Caplet::calCollocationConductorEntry(int panel_i, int panel_j) {
+//     const double four_pi_eps0 = 4.0 * M_PI * (double)epsilon0;
+
+//     if (panel_i == panel_j) {
+//         // return calGalerkinPEntry(panel_i, panel_j);
+//     }
+
+//     double target_x = panels[panel_i][X][CENTER];
+//     double target_y = panels[panel_i][Y][CENTER];
+//     double target_z = panels[panel_i][Z][CENTER];
+    
+//     double source_x = panels[panel_j][X][CENTER];
+//     double source_y = panels[panel_j][Y][CENTER];
+//     double source_z = panels[panel_j][Z][CENTER];
+
+//     double dx = target_x - source_x;
+//     double dy = target_y - source_y;
+//     double dz = target_z - source_z;
+//     double dij = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+//     if (dij < 1e-18) return 0.0;
+
+//     double Aj = (double)areas[panel_j];
+
+//     // Near / Far Condition based on assignment PDF (kappa = 6)
+//     if (dij < 6.0 * std::sqrt(Aj)) {
+//         // --- NEAR-FIELD: 7x7 Gauss-Legendre Quadrature ---
+        
+//         int nj_axis = dirs[panel_j];
+//         int u_axis = (nj_axis == X) ? Y : X;
+//         int v_axis = (nj_axis == Z) ? Y : Z; 
+
+//         double u_half = (panels[panel_j][u_axis][MAX] - panels[panel_j][u_axis][MIN]) / 2.0;
+//         double v_half = (panels[panel_j][v_axis][MAX] - panels[panel_j][v_axis][MIN]) / 2.0;
+//         double u_center = panels[panel_j][u_axis][CENTER];
+//         double v_center = panels[panel_j][v_axis][CENTER];
+//         double norm_pos = panels[panel_j][nj_axis][CENTER];
+
+//         double integral_sum = 0.0;
+//         for (int gu = 0; gu < GAUSS_N; ++gu) {
+//             for (int gv = 0; gv < GAUSS_N; ++gv) {
+//                 double pt[3];
+//                 pt[u_axis] = u_center + u_half * gauss_p[gu];
+//                 pt[v_axis] = v_center + v_half * gauss_p[gv];
+//                 pt[nj_axis] = norm_pos;
+
+//                 double dx_q = target_x - pt[X];
+//                 double dy_q = target_y - pt[Y];
+//                 double dz_q = target_z - pt[Z];
+//                 double R_jq = std::sqrt(dx_q*dx_q + dy_q*dy_q + dz_q*dz_q);
+
+//                 double weight = gauss_w[gu] * gauss_w[gv] * u_half * v_half;
+                
+//                 // Conductor equation: (1 / R_jq)
+//                 integral_sum += weight / R_jq;
+//             }
+//         }
+//         return integral_sum / four_pi_eps0;
+
+//     } else {
+//         // --- FAR-FIELD: 1-point Approximation ---
+//         return Aj / (four_pi_eps0 * dij);
+//     }
+// }
 
 void Caplet::extractC(MODE mode){
 	this->mode = mode;
@@ -864,7 +1011,59 @@ void Caplet::extractC(MODE mode){
     #endif
 }
 
+//determine the surrounding medium epsilon_out for every conductor panel.
+void Caplet::populateConductorMediums() {
+    struct DielBox { double min[3], max[3], eps; };
+    std::vector<DielBox> boxes;
+    std::vector<double> unique_eps;
+    
+    // Find unique permittivities from dielectric panels
+    //for example two dielectric panels with eps=4 will only count for one unique permitivitty 4
+    for(int i = 0; i < this->nPanels; ++i) {
+        if(isDielectric[i]) {
+            double eps = materialA[i];
+            if(std::find(unique_eps.begin(), unique_eps.end(), eps) == unique_eps.end()) {
+                unique_eps.push_back(eps);
+            }
+        }
+    }
+    
+    //Construct bounding boxes for each dielectric medium
+    for(double eps : unique_eps) {
+        DielBox b = {{1e9,1e9,1e9}, {-1e9,-1e9,-1e9}, eps};
+        for(int i = 0; i < this->nPanels; ++i) {
+            if(isDielectric[i] && materialA[i] == eps) {
+                for(int axis = 0; axis < 3; ++axis) {
+                    if(panels[i][axis][MIN] < b.min[axis]) b.min[axis] = panels[i][axis][MIN];
+                    if(panels[i][axis][MAX] > b.max[axis]) b.max[axis] = panels[i][axis][MAX];
+                }
+            }
+        }
+        for(int axis = 0; axis < 3; ++axis) { b.min[axis] -= 1e-5; b.max[axis] += 1e-5; }
+        boxes.push_back(b);
+    }
 
+    //Scan all conductor panels and assign the correct eps_out to materialB
+    for (int i = 0; i < this->nCoefs; ++i) { 
+        if (!isDielectric[i]) {
+            double eps_out = 1.0; // Default to free space
+            double cx = panels[i][X][CENTER];
+            double cy = panels[i][Y][CENTER];
+            double cz = panels[i][Z][CENTER];
+            
+            for(const auto& b : boxes) {
+                if(cx >= b.min[0] && cx <= b.max[0] &&
+                   cy >= b.min[1] && cy <= b.max[1] &&
+                   cz >= b.min[2] && cz <= b.max[2]) {
+                    eps_out = b.eps;
+                    break;
+                }
+            }
+            // Permanently save the surrounding medium for the solver
+            this->materialB[i] = eps_out; 
+        }
+    }
+}
 
 //***************************
 //*
@@ -876,6 +1075,7 @@ void Caplet::extractCCollocationDouble(){
     //find the total amount of groups
     int nTotalGroups = this->nWires + this->nDiels;
     int nTotalUnknowns = nCoefs + nTotalDielPanels;
+
 
     int rank = MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	if ( this->isLoaded == true ){
@@ -903,7 +1103,7 @@ void Caplet::extractCCollocationDouble(){
 
     this->generateCollocationPMatrixDouble();
     this->generateRHSDouble();
-
+    
     #ifdef CAPLET_TIMER
     this->timeAfterFilling = MPI_Wtime();
     #endif
@@ -914,24 +1114,55 @@ void Caplet::extractCCollocationDouble(){
 	int  	info;
 
     // int info;
+    //dcoefs is the V vector, dsegv writes the result of Pσ=V to the dcoefs vector
     dgesv_(&nTotalUnknowns, &this->nWires, dP, &nTotalUnknowns, ipiv,
         dcoefs, &nTotalUnknowns, &info);
     if (info != 0) {
         std::cout << "ERROR: dgesv returned info = " << info << std::endl;
     }
 
+
+    #ifdef ENABLE_DEBUG_PRINTS
+        printSigma();
+    #endif
+
+    //////////////////////////////////////////
+    // Set up drhs (Q) with the (Area * eps_out) multipliers for DGEMM ONLY FOR CONDUCTORS
+    /////////////////////////////////////////
+    std::fill(this->drhs, this->drhs + (nTotalUnknowns * this->nWires), 0.0);
+    
+    int current_panel = 0;
+    for (int w = 0; w < this->nWires; ++w) {
+        int numP = this->nWirePanels[w];
+        // cout << numP <<endl;
+        for (int p = 0; p < numP; ++p) {
+            double area = (double)this->areas[current_panel];
+            
+            // Assuming CAPLET's parser correctly populated materialB for conductors.
+            double eps_out = this->materialB[current_panel]; 
+            
+            this->drhs[current_panel + (nTotalUnknowns * w)] = area * eps_out;
+            current_panel++;
+        }
+    }
+
+    #ifdef ENABLE_DEBUG_PRINTS
+        printQ();
+    #endif
+
 	delete[] ipiv;
 
 	char 	transA 	= 't';
 	char 	transB 	= 'n';
-	double 	alpha 	= 4*pi*epsilon0;
+	double 	alpha 	= 1;
 	double 	beta 	= 0.0;
 
     //* Use matrix-matrix product to compute Cmat from coefs
+    //* Use matrix-matrix product to compute Cmat from coefs
     dgemm_(&transA, &transB,
             &this->nWires, &this->nWires, &this->nCoefs,
-            &alpha, this->drhs, &this->nCoefs,
-            this->dcoefs, &this->nCoefs,
+            &alpha, this->drhs, &nTotalUnknowns, 
+            this->dcoefs, &nTotalUnknowns,       
             &beta, this->dCmat, &this->nWires);
 
     #ifdef CAPLET_TIMER
@@ -940,8 +1171,84 @@ void Caplet::extractCCollocationDouble(){
  	this->solvingTime 	+= this->timeAfterSolving - this->timeAfterFilling;
  	this->totalTime		+= this->timeAfterSolving - this->timeStart;
     #endif
+
+    int num_cond = this->nWires;
+    std::vector<double> C_sym(num_cond * num_cond, 0.0);
+    std::vector<double> c_k(num_cond, 0.0);
+    double c_total = 0.0;
+
+    //Symmetrize the matrix C = 0.5 * (C + C^T)
+        for (int i = 0; i < num_cond; i++) {
+            for (int j = 0; j < num_cond; j++) {
+                // standard row-major (i * num_cond + j) for the final 3x3:
+                C_sym[i * num_cond + j] = 0.5 * (this->dCmat[i * num_cond + j] + this->dCmat[j * num_cond + i]);
+            }
+        }
+
+    
+    // charge to infinity: In open space, some charge goes far away.
+    // Calculate the row sums: c_k = \sum_m C_{k,m}
+    for (int k = 0; k < num_cond; k++) {
+        for (int m = 0; m < num_cond; m++) {
+            c_k[k] += C_sym[k * num_cond + m];
+        }
+        c_total += c_k[k];
+    }
+
+    //Apply the charge to infinity correction.
+    //C^closed = C - (c * c^T) / \sum_k c_k
+    for (int i = 0; i < num_cond; i++) {
+        for (int j = 0; j < num_cond; j++) {
+            this->dCmat[i*num_cond+j] = C_sym[i*num_cond+j] - ((c_k[i]*c_k[j]) /c_total);
+        }
+    }
+
 }
 
+#ifdef ENABLE_DEBUG_PRINTS
+void Caplet::printQ(){
+
+    int nTotalUnknowns = nCoefs + nTotalDielPanels;
+    int print_rows = nTotalUnknowns;
+
+
+    std::cout << "\n========== Q RESULTS (SIGMA DENSITIES) ==========\n";
+    // Limiting to 20 rows to avoid flooding your terminal. 
+    // Change print_rows to nTotalUnknowns to see every single panel.
+    // int print_rows = nTotalUnknowns;
+    
+    for (int row = 0; row < print_rows; ++row) {
+        for (int col = 0; col < this->nWires; ++col) {
+            // Calculate column-major 1D index
+            int index = row + (col * nTotalUnknowns);
+            std::cout << std::scientific << this->drhs[index] << " \t";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "=====================================================\n\n";
+    // #endif
+}
+
+void Caplet::printSigma(){
+
+    int nTotalUnknowns = nCoefs + nTotalDielPanels;
+    int print_rows = nTotalUnknowns;
+
+    std::cout << "\n========== DGESV RESULTS (SIGMA DENSITIES) ==========\n";
+    // Limiting to 20 rows to avoid flooding your terminal. 
+    // Change print_rows to nTotalUnknowns to see every single panel.
+    
+    for (int row = 0; row < print_rows; ++row) {
+        for (int col = 0; col < this->nWires; ++col) {
+            // Calculate column-major 1D index
+            int index = row + (col * nTotalUnknowns);
+            std::cout << std::scientific << this->dcoefs[index] << " \t";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "=====================================================\n\n";
+}
+#endif
 
 void Caplet::generateCollocationPMatrixDouble() {
 
@@ -954,13 +1261,6 @@ void Caplet::generateCollocationPMatrixDouble() {
 
 
     int nTotal = this->nCoefs + this->nTotalDielPanels;
-
-    // 1. Secure Matrix Wipe
-    int nMatSize = nTotal * nTotal;
-    std::fill(dP, dP + nMatSize, 0.0);
-
-
-    
 
     //if there are no dielectric panels just use the the original code for conductors
     if(this->nTotalDielPanels==0){
@@ -983,20 +1283,12 @@ void Caplet::generateCollocationPMatrixDouble() {
 
             double entry = 0.0;
 
-            // if ( isDielectric[i] ) {
-            //     // --- Dielectric row: E-kernel ----------------------------------
-            //     entry = calCollocationEEntryDouble(i, j);
-            // } else {
-                // --- Conductor row: P-kernel -----------------------------------
-                // Original collocation formula (1/r potential integral).
             entry = calGalerkinPEntry(i, j);
-            // }
 
             dP[ ind[i] + nCoefs * ind[j] ] += entry;
         }
 
         delete[] ind;  
-        // cout << "HI" <<endl;
         #ifdef ENABLE_P_MATRIX_PRINT
             print_dP(this->nPanels);
         #endif
@@ -1004,8 +1296,10 @@ void Caplet::generateCollocationPMatrixDouble() {
         return;
     }
     else{
+
+
         // extended case with dielectrics
-        int nTotal = this->nCoefs + this->nTotalDielPanels;
+        // int nTotal = this->nCoefs + this->nTotalDielPanels;
         
         // Build mapping: panel index -> unknown index
         // so the panels are in the correct order for the matrix however they were read
@@ -1019,6 +1313,7 @@ void Caplet::generateCollocationPMatrixDouble() {
                 panelToUnknown[i] = dielIdx++;
         }
 
+        //DEBUG PRINTS TO CHECK THE MAPPING OF THE CONDUCTORS TO UKNOWNs
         #ifdef ENABLE_DEBUG_PRINTS
         std::cout << "Panel to unknown mapping:" << std::endl;
         #endif
@@ -1029,82 +1324,34 @@ void Caplet::generateCollocationPMatrixDouble() {
             #endif
         }
 
-        // Fill matrix
-        // for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
-        //      //find to which uknown the current panel corresponds to 
-        //      //for example eqPanel=0 could correspond to dielectric which is after the conductors in the P matrix
-        //     int row = panelToUnknown[eqPanel];
-        //     if (row == -1)
-        //         continue;
-
-        //     if (!isDielectric[eqPanel]) {  // Conductor equation
-        //         for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
-        //             int col = panelToUnknown[srcPanel];
-        //             if (col == -1) continue;
-        //             double P = calGalerkinPEntry(eqPanel, srcPanel);
-        //             dP[row + nTotal * col] += P;
-        //             #ifdef ENABLE_DEBUG_PRINTS
-        //                 std::cout << std::setw(14) << std::scientific << P << " " << endl;
-        //                 if (std::isnan(P) || std::isinf(P)) {
-        //                     std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-        //                 }
-        //             #endif
-        //         }
-        //     } else {  // Dielectric equation
-        //         #ifdef ENABLE_DEBUG_PRINTS
-        //             cout << "materialA: " << this->materialA[eqPanel] << "materialB: " << this->materialB[eqPanel];
-        //         #endif
-
-        //         double deps = this->materialA[eqPanel] - this->materialB[eqPanel];
-        //         for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
-        //             if(eqPanel==srcPanel){
-        //                 // Q=(deps)/(2*epsilon0);
-        //                 Q=0;
-        //             }
-        //             else{
-        //             Q = calCollocationQEntry(eqPanel, srcPanel);
-
-        //             }
-        //             int col = panelToUnknown[srcPanel];
-        //             if (col == -1) continue;
-        //             // cout << "HIII\n";
-        //             dP[row + nTotal * col] += deps * Q;
-        //             #ifdef ENABLE_DEBUG_PRINTS
-        //                 std::cout << std::setw(14) << std::scientific << Q << " " << endl;
-        //                 if (std::isnan(Q) || std::isinf(Q)) {
-        //                     std::cout << "NaN/Inf in P for eqPanel=" << eqPanel << " srcPanel=" << srcPanel << std::endl;
-        //                 }
-        //             #endif
-
-
-        //             // cout << eqPanel, srcPanel, Q << endl;
-
-        //         }
-        //     }
-
-        // }
-
         const double four_pi_eps0 = 4.0 * M_PI * (double)epsilon0;      
+        #ifdef CAPLET_OPENMP
+            #pragma omp parallel for num_threads(CAPLET_OPENMP_NUM_THREADS)
+        #endif
 
-        for (int eqPanel = 0; eqPanel < this->nPanels; ++eqPanel) {
+        //this loop goes through all the panels interactins with each other
+        for (int eqPanel = 0; eqPanel < this->nPanels; eqPanel++){
                 int row = panelToUnknown[eqPanel];
                 if (row == -1) 
                     continue;
 
-                for (int srcPanel = 0; srcPanel < this->nPanels; ++srcPanel) {
+                for (int srcPanel = 0; srcPanel < this->nPanels; srcPanel++){
                     int col = panelToUnknown[srcPanel];
                     if (col == -1) 
                         continue;
 
-                    if (!isDielectric[eqPanel]) {
-            // Use Galerkin, but divide by the test panel area (areas[eqPanel]) 
-                // to convert the double integral back into a collocation-style single integral
-                double P_val = calGalerkinPEntry(eqPanel, srcPanel);
-                double Ai = (double)areas[eqPanel];
-                
-                dP[row + nTotal * col] += (P_val / Ai) / four_pi_eps0;
-                    } else {
-                        // Dielectric row: use the dielectric boundary condition function
+                    if (!isDielectric[eqPanel]){
+
+                        // Use Galerkin as is used in default collocation, but divide by the test panel area (areas[eqPanel]) 
+                        // to convert the double integral back into a collocation-style single integral
+                        double P_val = calGalerkinPEntry(eqPanel, srcPanel);
+                        double Ai = (double)areas[eqPanel];
+                        
+                        // divide here with 4piε0 to not complicate the solving of the final equation in extractCCollocationDouble()
+                        dP[row + nTotal * col] += (P_val / Ai) / four_pi_eps0;
+                    } 
+                    else{
+                        
                         dP[row + nTotal * col] += calCollocationDielectricEntry(eqPanel, srcPanel);
                     }
                 }
@@ -1133,7 +1380,7 @@ void Caplet::generateCollocationPMatrixDouble() {
 
 //PRINT IN FILE
 void Caplet::print_dP(int nTotal, const std::string& filename) const {
-    // Open the file for writing (use std::ios::app if you want to append instead of overwrite)
+    // Open the file for writing
     std::ofstream outFile(filename);
     
     if (!outFile.is_open()) {
@@ -1155,161 +1402,6 @@ void Caplet::print_dP(int nTotal, const std::string& filename) const {
 }
 #endif
 
-////RUUUNS
-// double Caplet::calCollocationQEntry(int panel_i, int panel_j) {
-//     // Get the rotated coordinates of the centroids
-//     // We need to rotate panel_i so its normal becomes +Z,
-//     // and apply the same rotation to panel_j.
-
-//     // Temporary coordinate arrays for the two panels (like in calCollocationPEntryDouble)
-//     float *coord_i[3][4];
-//     float *coord_j[3][4];
-
-//     // Choose rotation based on the normal direction of panel_i
-//     //change locally the panels so their normals are at Z
-//     switch (dirs[panel_i]) {
-//         case X:
-//             rotateX2Z(coord_i, panel_i);
-//             rotateX2Z(coord_j, panel_j);
-//             break;
-//         case Y:
-//             rotateY2Z(coord_i, panel_i);
-//             rotateY2Z(coord_j, panel_j);
-//             break;
-//         case Z:
-//             rotateZ2Z(coord_i, panel_i);
-//             rotateZ2Z(coord_j, panel_j);
-//             break;
-//         default:
-//             return 0.0;
-//     }
-
-//     cout << "panel_i: " << panel_i << " direction: " << dirs[panel_i];
-//     cout << "panel_j: " << panel_j << " direction: " << dirs[panel_j];
-
-
-//     // Now the centroids are in the rotated frame.
-//     // For panel_i, its normal is +Z, so its centroid has coordinates (x_i, y_i, z_i).
-//     // For panel_j, its centroid is (x_j, y_j, z_j) after the same rotation.
-//     double xi = (*coord_i[X])[CENTER];
-//     double yi = (*coord_i[Y])[CENTER];
-//     double zi = (*coord_i[Z])[CENTER];
-//     double xj = (*coord_j[X])[CENTER];
-//     double yj = (*coord_j[Y])[CENTER];
-//     double zj = (*coord_j[Z])[CENTER];
-
-//     //compute the formula
-//     double dx = xi - xj;
-//     double dy = yi - yj;
-//     double dz = zi - zj;
-//     double r = sqrt(dx*dx + dy*dy + dz*dz);
-//     double r3 = r * r * r;
-
-//     // Avoid division by zero for self‑panel (i == j)
-//     if (r3 < 1e-18) return 0.0;
-
-//     // Q = A_j / (4π ε0) * ( - dz / r³ )
-//     double Q = - areas[panel_j] * (dz / r3);
-
-//     return Q;
-// }
-
-double Caplet::calCollocationQEntry(int panel_i, int panel_j) {
-    // Vector from source panel j center to test panel i center
-    double dx = panels[panel_i][X][CENTER] - panels[panel_j][X][CENTER];
-    double dy = panels[panel_i][Y][CENTER] - panels[panel_j][Y][CENTER];
-    double dz = panels[panel_i][Z][CENTER] - panels[panel_j][Z][CENTER];
-
-    #ifdef ENABLE_DEBUG_PRINTS
-        cout << "panel_i: " << panel_i << " direction: " << dirs[panel_i] << endl;
-        cout << "panel_j: " << panel_j << " direction: " << dirs[panel_j] << endl;
-    #endif
-
-    // Component along the outward normal of panel i
-    double ndotr = 0.0;
-    switch (dirs[panel_i]) {
-        case X: ndotr = dx; break;
-        case Y: ndotr = dy; break;
-        case Z: ndotr = dz; break;
-        default: return 0.0;
-    }
-
-    double r = sqrt(dx*dx + dy*dy + dz*dz);
-    double r3 = r * r * r;
-    if (r3 < 1e-18) return 0.0;
-
-    // Q = - (area of source) * (normal component) / r^3
-    return - areas[panel_j] * ndotr / r3;
-}
-
-double Caplet::calCollocationEEntryDouble(int panel_d, int panel_j) {
-
-    float *cd[3][4];   // coordinate pointers for dielectric panel d (test point)
-    float *cj[3][4];   // coordinate pointers for source panel j
-
-    const double eps_a = materialA[panel_d];  // permittivity on n_hat_d side
-    const double eps_b = materialB[panel_d];  // permittivity on opposite side
-
-    // --- Analytically exact: same-direction panels -----------------------
-    // When panel_d and panel_j face the same direction, one rotation maps
-    // both panels so that n_hat_d = Z.  calEColD then integrates Δz/r^3 over
-    // panel j, where Δz is the displacement along n_hat_d.
-
-    // if ( dirs[panel_d] == dirs[panel_j] ) {
-    //     switch ( dirs[panel_d] ) {
-    //     case X:
-    //         this->rotateX2Z(cd, panel_d);
-    //         this->rotateX2Z(cj, panel_j);
-    //         break;
-    //     case Y:
-    //         this->rotateY2Z(cd, panel_d);
-    //         this->rotateY2Z(cj, panel_j);
-    //         break;
-    //     default: // Z
-    //         this->rotateZ2Z(cd, panel_d);
-    //         this->rotateZ2Z(cj, panel_j);
-    //         break;
-    //     }
-    //     return -(eps_a - eps_b) * calEColD(cd, cj);
-
-
-    // }
-
-    cout << "panel_d: " << panel_d << "direction: " << dirs[panel_d];
-    cout << "panel_j: " << panel_j << "direction: " << dirs[panel_j];
-
-
-                // --- Far-field dipole: cross-direction panels --------------------------
-    // For panels with different orientations (e.g., vertical sidewall + horizontal
-    // dielectric layer), the outward normal of d does not align with the natural
-    // integration direction of j.  We use the monopole/dipole approximation:
-    //
-    //   d/dn_hat_d (1/r)  ≈  -(n_hat_d · (r_d - r_j)) / |r_d - r_j|^3
-    //
-    // accurate when |r_d - r_j| >> max(size_d, size_j).
- 
-    const double dx = panels[panel_d][X][CENTER] - panels[panel_j][X][CENTER];
-    const double dy = panels[panel_d][Y][CENTER] - panels[panel_j][Y][CENTER];
-    const double dz = panels[panel_d][Z][CENTER] - panels[panel_j][Z][CENTER];
-    const double r2 = dx*dx + dy*dy + dz*dz;
-    if (r2 < 1e-30) return 0.0;   // coincident panel centers (guard)
-    const double r3 = r2 * std::sqrt(r2);
- 
-    // Normal component of (r_d - r_j) along n_hat_d
-    double ndotr = 0.0;
-    switch ( dirs[panel_d] ) {
-    case X: ndotr = dx; break;
-    case Y: ndotr = dy; break;
-    default: ndotr = dz; break;
-    }
- 
-    // E_dj ≈ -(eps_a - eps_b) * (-ndotr / r^3) = (eps_a - eps_b) * ndotr / r^3
-    // (the leading minus comes from d/dn(1/r) = -(n · (r_d - r'))/r^3,
-    //  here evaluated at r' = r_j center)
-    return -(eps_a - eps_b) * (-ndotr / r3);
-
-
-}
 
 
 double Caplet::calCollocationPEntryDouble(int panel1, int panel2){
@@ -1354,6 +1446,9 @@ void Caplet::generateRHSDouble() {
         int columnIndex =  0;   // current wire index
         int coefCounter =  0;   // counts coefs assigned to current wire
 
+        // #ifdef CAPLET_OPENMP
+        //     #pragma omp parallel for num_threads(CAPLET_OPENMP_NUM_THREADS)
+        // #endif
         for (int i = 0; i < this->nPanels; i++) {
 
             // Always advance the row index (even for dielectric panels,

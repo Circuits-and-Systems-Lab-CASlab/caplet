@@ -53,7 +53,7 @@ along with CAPLET.  If not, see <http://www.gnu.org/licenses/>.
 
 //* Openmp num of threads
 #ifdef CAPLET_OPENMP
-    #define CAPLET_OPENMP_NUM_THREADS 4
+    #define CAPLET_OPENMP_NUM_THREADS 16
 #endif
 
 namespace caplet{

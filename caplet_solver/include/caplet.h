@@ -174,6 +174,10 @@ private: //* functions
 
 	double calCollocationQEntry(int panel_i, int panel_j);
 	double calCollocationDielectricEntry(int panel_i, int panel_j);
+	void populateConductorMediums();
+	double calCollocationConductorEntry(int panel_i, int panel_j);
+	void printQ();
+	void printSigma();
 
 private: //* coordinate functions
 	inline void rotateX2Z(float* coord_ptr[3][4], int panelNo){
