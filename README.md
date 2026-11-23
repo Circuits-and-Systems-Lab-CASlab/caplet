@@ -1,7 +1,7 @@
 [Caplet]
 ========
 
-[Caplet] is a capacitance extraction and visualization toolkit for VLSI interconnects that
+[Caplet] is a capacitance extraction and visualization toolkit for VLSI interconnects that 
 
 - Visualizes GDS2 layout files
 - Generates basis functions automatically
